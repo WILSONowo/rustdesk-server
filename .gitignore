@@ -10,3 +10,14 @@ src/version.rs
 db_v2.sqlite3
 test.*
 .idea
+/artifacts/
+
+# Runtime secrets and databases (tracked build schema is retained)
+.env.local
+.env.*.local
+*.pem
+*.key
+*.sqlite3-wal
+*.sqlite3-shm
+/data/
+/backups/

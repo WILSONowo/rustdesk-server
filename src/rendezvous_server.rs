@@ -1,5 +1,6 @@
 use crate::common::*;
 use crate::peer::*;
+use crate::secure_tcp::SecureTcp;
 use hbb_common::{
     allow_err, bail,
     bytes::{Bytes, BytesMut},
@@ -16,7 +17,7 @@ use hbb_common::{
         register_pk_response::Result::{TOO_FREQUENT, UUID_MISMATCH},
         *,
     },
-    tcp::{listen_any, FramedStream},
+    tcp::{listen_any, Encrypt, FramedStream},
     timeout,
     tokio::{
         self,
@@ -51,7 +52,7 @@ const REG_TIMEOUT: i64 = 30_000;
 type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
 type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
 enum Sink {
-    TcpStream(TcpStreamSink),
+    TcpStream(TcpStreamSink, Option<Encrypt>),
     Ws(WsSink),
 }
 type Sender = mpsc::UnboundedSender<Data>;
@@ -823,7 +824,11 @@ impl RendezvousServer {
         if let Some(sink) = sink.as_mut() {
             if let Ok(bytes) = msg.write_to_bytes() {
                 match sink {
-                    Sink::TcpStream(s) => {
+                    Sink::TcpStream(s, cipher) => {
+                        let bytes = match cipher {
+                            Some(cipher) => cipher.enc(&bytes),
+                            None => bytes,
+                        };
                         allow_err!(s.send(Bytes::from(bytes)).await);
                     }
                     Sink::Ws(ws) => {
@@ -1178,8 +1183,29 @@ impl RendezvousServer {
             }
         } else {
             let (a, mut b) = Framed::new(stream, BytesCodec::new()).split();
-            sink = Some(Sink::TcpStream(a));
-            while let Ok(Some(Ok(bytes))) = timeout(30_000, b.next()).await {
+            sink = Some(Sink::TcpStream(a, None));
+            let mut secure = SecureTcp::default();
+            if !key.is_empty() {
+                if let Some(sk) = self.inner.sk.as_ref() {
+                    let (state, offer) = SecureTcp::offer(sk);
+                    secure = state;
+                    Self::send_to_sink(&mut sink, offer).await;
+                }
+            }
+            while let Ok(Some(Ok(mut bytes))) = timeout(30_000, b.next()).await {
+                match secure.receive(&mut bytes) {
+                    Ok(Some(cipher)) => {
+                        if let Some(Sink::TcpStream(_, outbound)) = sink.as_mut() {
+                            *outbound = Some(cipher);
+                        }
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        log::debug!("Invalid TCP frame from {addr}: {err}");
+                        break;
+                    }
+                }
                 if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
                     break;
                 }
