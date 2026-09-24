@@ -1,5 +1,7 @@
 # RustDesk Server Program
 
+本 fork 当前版本：**1.1.16-beta1** · [版本规则](VERSIONING.md) · [贡献者](CONTRIBUTORS.md)
+
 > This fork adds the official 1.1.16 hbbs API-login TCP handshake compatibility patch. See [API_HANDSHAKE.md](API_HANDSHAKE.md) and [fork build/release notes](FORK_RELEASE.md). Upstream download links below do not include this patch.
 
 [![build](https://github.com/rustdesk/rustdesk-server/actions/workflows/build.yaml/badge.svg)](https://github.com/rustdesk/rustdesk-server/actions/workflows/build.yaml)

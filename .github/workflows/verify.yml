@@ -1,7 +1,8 @@
 name: Verify API handshake
 on:
   push:
-    branches: [master, 'codex/**']
+    branches: [master, 'feature/**']
+    tags: ['*beta*']
   pull_request:
   workflow_dispatch:
 permissions:

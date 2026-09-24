@@ -16,5 +16,5 @@ docker run --rm \
         cargo build --locked --release --bin hbbs
         HBBS_TEST_BINARY=/src/target/release/hbbs cargo test --locked --test secure_handshake
         cp target/release/hbbs artifacts/hbbs'
-docker build -f Dockerfile.api-local -t rustdesk-hbbs:1.1.16-api1-local .
+docker build -f Dockerfile.api-local -t rustdesk-hbbs:1.1.16-beta1-local .
 sha256sum artifacts/hbbs

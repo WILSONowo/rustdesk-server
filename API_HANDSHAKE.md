@@ -67,7 +67,7 @@ docker compose -f compose.api-local.yaml exec hbbs cat /root/id_ed25519.pub
 不要将生产 `id_ed25519`、运行数据库或 SSH/SMTP 凭据加入仓库。
 
 Linux 构建入口为 `sh scripts/build-api-local.sh`，Windows 为 `./scripts/build-api-local.ps1`。
-两者都先构建和测试源码，再生成 `rustdesk-hbbs:1.1.16-api1-local` 镜像；不会自动启动或更新服务器。
+两者都先构建和测试源码，再生成 `rustdesk-hbbs:1.1.16-beta1-local` 镜像；不会自动启动或更新服务器。
 克隆时使用 `git clone --recurse-submodules`，已有克隆执行 `git submodule update --init --recursive`。
 上游跟踪的 `.env` 仅含编译用 DATABASE_URL，`db_v2.sqlite3` 是 SQLx 编译用的上游数据库样本（含示例记录），不是本次部署的运行数据。
 

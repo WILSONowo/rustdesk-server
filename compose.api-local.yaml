@@ -1,7 +1,7 @@
 name: rustdesk-handshake-local
 services:
   hbbs:
-    image: rustdesk-hbbs:1.1.16-api1-local
+    image: rustdesk-hbbs:1.1.16-beta1-local
     command: ["hbbs", "-k", "_", "-r", "127.0.0.1:21127"]
     ports:
       - "127.0.0.1:21125:21115/tcp"
