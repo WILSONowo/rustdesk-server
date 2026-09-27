@@ -51,7 +51,8 @@ impl Database {
         if !std::path::Path::new(url).exists() {
             std::fs::File::create(url).ok();
         }
-        let n: usize = crate::common::get_arg_or("MAX_DATABASE_CONNECTIONS", "1".to_owned())
+        let n: usize = std::env::var("MAX_DATABASE_CONNECTIONS")
+            .unwrap_or_else(|_| "1".to_owned())
             .parse()
             .unwrap_or(1);
         log::debug!("MAX_DATABASE_CONNECTIONS={}", n);

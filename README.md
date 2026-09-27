@@ -1,23 +1,20 @@
 # RustDesk Server Program
 
+本 fork 当前版本：**1.1.16-beta1** · [版本规则](VERSIONING.md) · [贡献者](CONTRIBUTORS.md)
+
+> This fork adds the official 1.1.16 hbbs API-login TCP handshake compatibility patch. See [API_HANDSHAKE.md](API_HANDSHAKE.md) and [fork build/release notes](FORK_RELEASE.md). Upstream download links below do not include this patch.
+
 [![build](https://github.com/rustdesk/rustdesk-server/actions/workflows/build.yaml/badge.svg)](https://github.com/rustdesk/rustdesk-server/actions/workflows/build.yaml)
 
 [**Download**](https://github.com/rustdesk/rustdesk-server/releases)
 
 [**Manual**](https://rustdesk.com/docs/en/self-host/)
 
-[**Configuration & environment variables**](docs/environment-variables.md)
-
 [**FAQ**](https://github.com/rustdesk/rustdesk/wiki/FAQ)
 
 [**How to migrate OSS to Pro**](https://rustdesk.com/docs/en/self-host/rustdesk-server-pro/installscript/#convert-from-open-source)
 
 Self-host your own RustDesk server, it is free and open source.
-
-> [!IMPORTANT]
-> **Need more features?** [RustDesk Server Pro](https://rustdesk.com/pricing.html) might suit you better.
->
-> **Want to develop your own server?** Start with [rustdesk-server-demo](https://github.com/rustdesk/rustdesk-server-demo), a simpler starting point than this repository.
 
 ## How to build manually
 
@@ -33,26 +30,9 @@ Three executables will be generated in target/release.
 
 You can find updated binaries on the [Releases](https://github.com/rustdesk/rustdesk-server/releases) page.
 
-## Configuration
+If you want extra features, [RustDesk Server Pro](https://rustdesk.com/pricing.html) might suit you better.
 
-`hbbs` and `hbbr` can be configured with command-line flags, environment
-variables, or an `.env` / config file. Run `hbbs --help` or `hbbr --help` to see
-the available flags.
-
-The most common options:
-
-| Option | Flag | Env var | Applies to | Purpose |
-| --- | --- | --- | --- | --- |
-| Key | `-k` | `KEY` | hbbs, hbbr | `hbbs` loads/generates one by default |
-| Bind address | `-b` | `BIND` | hbbs, hbbr | Local IP address to listen on (default: all interfaces; requires 1.1.17+) |
-| Port | `-p` | `PORT` | hbbs, hbbr | Listening port (hbbs `21116`, hbbr `21117`) |
-| Relay servers | `-r` | `RELAY-SERVERS` | hbbs | Override when the relay uses a different address or a non-standard port |
-| Force relay | — | `ALWAYS_USE_RELAY` | hbbs | `Y` disables direct connections |
-| Log level | — | `RUST_LOG` | hbbs, hbbr | e.g. `debug` (default `info`) |
-
-See **[docs/environment-variables.md](docs/environment-variables.md)** for the
-full list of variables, the file/flag/env precedence rules, database and relay
-bandwidth tuning, Docker image variables, and examples.
+If you want to develop your own server, [rustdesk-server-demo](https://github.com/rustdesk/rustdesk-server-demo) might be a better and simpler start for you than this repo.
 
 ## Installation
 
