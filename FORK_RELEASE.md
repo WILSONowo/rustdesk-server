@@ -1,7 +1,7 @@
-# API 登录握手兼容 fork
+# API 登录握手修复
 
-上游：`rustdesk/rustdesk-server`，基线 tag `1.1.16`（`73523b31cfd25d77dee862e6fc9f5e1fb5e485ef`）。目标 fork：`WILSONowo/rustdesk-server`。
+基于官方 RustDesk Server 1.1.16，修复客户端登录 API 后连接 hbbs 的安全握手超时问题，具体实现见 [API_HANDSHAKE.md](API_HANDSHAKE.md)。
 
-详见 [API_HANDSHAKE.md](API_HANDSHAKE.md)。本版本仅补齐 hbbs 原生 TCP 的签名握手和加密信令处理；不替换 API、不校验账号 token、不强制远控登录。hbbr 保持上游行为。
+修改集中在 hbbs 的原生 TCP 握手和加密信令，hbbr 保持上游行为。不包含 API token 校验或强制登录功能，远控仍使用客户端原有的密码与授权机制。
 
-保留上游 AGPL-3.0 许可证与版权声明，发布衍生镜像时同时提供匹配提交的源码和构建步骤。
+项目保留上游 AGPL-3.0 许可证和版权声明。

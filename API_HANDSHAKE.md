@@ -1,23 +1,15 @@
-# 官方 1.1.16 的 API 登录握手兼容补丁
+# API 登录握手
 
-基线：官方 tag `1.1.16`，commit `73523b31cfd25d77dee862e6fc9f5e1fb5e485ef`。
-参考：lejianwen/rustdesk-server 的 forapi 分支，以及官方 RustDesk 1.4.9 的
-`src/common.rs::secure_tcp_impl` / `create_symmetric_key_msg`。
+基于官方 `1.1.16`（`73523b31cfd25d77dee862e6fc9f5e1fb5e485ef`），参考 forapi 分支和官方 RustDesk 1.4.9 的握手实现，补齐 hbbs 的 TCP 安全握手。
 
-## 修改范围
+客户端配置公钥并登录 API 后，会等待服务端发送签名 KeyExchange。原版 hbbs 缺少这一步，会出现 `Failed to secure tcp: deadline has elapsed`。
 
-官方客户端在同时配置公钥、登录 API 账号时，会等待 hbbs 的签名 KeyExchange。
-原版开源 hbbs 没有发送这个消息，导致 `Failed to secure tcp: deadline has elapsed`。
-补丁增加签名握手及加密后的双向 TCP 协议处理，回复所用加密状态随异步响应的 sink 保存。
+实现内容：
 
-- 使用已有 `id_ed25519` 签名，每个连接独立生成临时 box 密钥。
-- 复用官方 hbb_common 的 Encrypt，未升级依赖；Cargo.lock 仅同步本项目版本号。
+- 使用现有 `id_ed25519` 签名，为每条连接生成独立临时密钥。
+- 复用 hbb_common 的加密实现，让异步回复沿用连接的加密状态。
 - 检查握手长度，拒绝重复握手、篡改、重放和加密后的明文降级。
-- 没登录 API 的官方 1.4.9 客户端可忽略握手提示，继续原有明文信令流程。
-- 只改变 hbbs 主 TCP 监听；UDP、WebSocket、管理/NAT 端口及 hbbr 不改。
-- 不移植 forapi 的 API 数据库、JWT、MUST_LOGIN 或日志中的密钥输出。
 
-**兼容登录不等于鉴权授权。** 本补丁不验证 API token、不限制只有登录用户才能连接，
-也不实现“每个用户只能控制分配设备”。原有客户端远控密码/授权与端到端加密仍由原协议负责。
+未登录 API 的客户端仍可使用原有信令流程。UDP、WebSocket、管理／NAT 端口和 hbbr 保持原有行为，依赖版本未升级。
 
-项目说明参见 [FORK_RELEASE.md](FORK_RELEASE.md)。保留原 AGPL-3.0 许可证及版权声明。
+这项修复不校验 API token，也不限制账号只能控制指定设备。远控密码、确认授权和端到端加密仍由原协议处理。

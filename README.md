@@ -1,8 +1,8 @@
 # RustDesk Server Program
 
-本 fork 当前版本：**1.1.16-beta1** · [下载](https://github.com/WILSONowo/rustdesk-server/releases/latest) · [版本信息](VERSIONING.md) · [贡献者](CONTRIBUTORS.md)
+当前版本：**1.1.16-beta1** · [下载](https://github.com/WILSONowo/rustdesk-server/releases/latest) · [版本信息](VERSIONING.md) · [贡献者](CONTRIBUTORS.md)
 
-> This fork adds the official 1.1.16 hbbs API-login TCP handshake compatibility patch. See [API_HANDSHAKE.md](API_HANDSHAKE.md) and [fork overview](FORK_RELEASE.md). Upstream download links below do not include this patch.
+> 基于官方 1.1.16，修复客户端登录 API 后的 TCP 握手超时。详见 [项目说明](FORK_RELEASE.md) 和 [握手实现](API_HANDSHAKE.md)。本 fork 使用上方下载入口，下方保留上游说明。
 
 [![build](https://github.com/rustdesk/rustdesk-server/actions/workflows/build.yaml/badge.svg)](https://github.com/rustdesk/rustdesk-server/actions/workflows/build.yaml)
 
