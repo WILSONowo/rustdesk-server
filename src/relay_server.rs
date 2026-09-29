@@ -29,9 +29,10 @@ use std::{
 };
 
 type Usage = (usize, usize, usize, usize);
+struct WaitingPeer { stream: Box<dyn StreamTrait>, ticket: uuid::Uuid }
 
 lazy_static::lazy_static! {
-    static ref PEERS: Mutex<HashMap<String, Box<dyn StreamTrait>>> = Default::default();
+    static ref PEERS: Mutex<HashMap<String, WaitingPeer>> = Default::default();
     static ref USAGE: RwLock<HashMap<String, Usage>> = Default::default();
     static ref BLACKLIST: RwLock<HashSet<String>> = Default::default();
     static ref BLOCKLIST: RwLock<HashSet<String>> = Default::default();
@@ -47,6 +48,17 @@ const BLOCKLIST_FILE: &str = "blocklist.txt";
 
 #[tokio::main(flavor = "multi_thread")]
 pub async fn start(port: &str, key: &str) -> ResultType<()> {
+    let metrics = crate::relay_metrics::start_from_env()?;
+    let metrics_task = async {
+        match metrics {
+            Some(task) => match task.await {
+                Ok(Ok(())) => bail!("Relay metrics server stopped"),
+                Ok(Err(err)) => bail!("Relay metrics server failed: {err}"),
+                Err(err) => bail!("Relay metrics task failed: {err}"),
+            },
+            None => std::future::pending::<ResultType<()>>().await,
+        }
+    };
     let key = get_server_sk(key);
     if let Ok(mut file) = std::fs::File::open(BLACKLIST_FILE) {
         let mut contents = String::new();
@@ -92,6 +104,7 @@ pub async fn start(port: &str, key: &str) -> ResultType<()> {
     tokio::select!(
         res = main_task => res,
         res = listen_signal => res,
+        res = metrics_task => res,
     )
 }
 
@@ -432,8 +445,18 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                     return;
                 }
                 if !rf.uuid.is_empty() {
-                    let mut peer = PEERS.lock().await.remove(&rf.uuid);
-                    if let Some(peer) = peer.as_mut() {
+                    let ticket = uuid::Uuid::new_v4();
+                    // Lookup and insertion must be atomic when both clients arrive together.
+                    let paired = {
+                        let mut peers = PEERS.lock().await;
+                        if let Some(peer) = peers.remove(&rf.uuid) {
+                            Some((stream, peer.stream))
+                        } else {
+                            peers.insert(rf.uuid.clone(), WaitingPeer { stream: Box::new(stream), ticket });
+                            None
+                        }
+                    };
+                    if let Some((mut stream, mut peer)) = paired {
                         log::info!("Relayrequest {} from {} got paired", rf.uuid, addr);
                         let id = format!("{}:{}", addr.ip(), addr.port());
                         USAGE.write().await.insert(id.clone(), Default::default());
@@ -442,7 +465,7 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                             stream.set_raw();
                             log::info!("Both are raw");
                         }
-                        if let Err(err) = relay(addr, &mut stream, peer, limiter, id.clone()).await
+                        if let Err(err) = relay(addr, &mut stream, &mut peer, limiter, id.clone()).await
                         {
                             log::info!("Relay of {} closed: {}", addr, err);
                         } else {
@@ -451,9 +474,11 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                         USAGE.write().await.remove(&id);
                     } else {
                         log::info!("New relay request {} from {}", rf.uuid, addr);
-                        PEERS.lock().await.insert(rf.uuid.clone(), Box::new(stream));
                         sleep(30.).await;
-                        PEERS.lock().await.remove(&rf.uuid);
+                        let mut peers = PEERS.lock().await;
+                        if peers.get(&rf.uuid).map(|peer| peer.ticket) == Some(ticket) {
+                            peers.remove(&rf.uuid);
+                        }
                     }
                 }
             }
@@ -469,6 +494,7 @@ async fn relay(
     id: String,
 ) -> ResultType<()> {
     let ip = addr.ip().to_string();
+    let _session = crate::relay_metrics::Session::start();
     let mut tm = std::time::Instant::now();
     let mut elapsed = 0;
     let mut total = 0;
@@ -499,6 +525,7 @@ async fn relay(
                     total_s += nb;
                     if !bytes.is_empty() {
                         stream.send_raw(bytes.into()).await?;
+                        crate::relay_metrics::forwarded(nb / 8);
                     }
                 } else {
                     break;
@@ -518,6 +545,7 @@ async fn relay(
                     total_s += nb;
                     if !bytes.is_empty() {
                         peer.send_raw(bytes.into()).await?;
+                        crate::relay_metrics::forwarded(nb / 8);
                     }
                 } else {
                     break;

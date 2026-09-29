@@ -1,0 +1,30 @@
+{
+  "poll_seconds": 3,
+  "timeout_ms": 1500,
+  "stale_seconds": 12,
+  "recovery_successes": 2,
+  "candidate_slack_km": 2500,
+  "geoip_database": "GeoLite2-City.mmdb",
+  "nodes": [
+    {
+      "id": "tokyo",
+      "address": "relay-tokyo.example.com:21117",
+      "metrics_url": "https://metrics-tokyo.example.com/metrics",
+      "token_env": "RELAY_TOKEN_TOKYO",
+      "location": { "latitude": 35.68, "longitude": 139.69 },
+      "max_sessions": 200,
+      "bandwidth_mbps": 800,
+      "drain": false
+    },
+    {
+      "id": "frankfurt",
+      "address": "relay-frankfurt.example.com:21117",
+      "metrics_url": "https://metrics-frankfurt.example.com/metrics",
+      "token_env": "RELAY_TOKEN_FRANKFURT",
+      "location": { "latitude": 50.11, "longitude": 8.68 },
+      "max_sessions": 200,
+      "bandwidth_mbps": 800,
+      "drain": false
+    }
+  ]
+}

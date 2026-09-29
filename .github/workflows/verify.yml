@@ -1,4 +1,4 @@
-name: Verify API handshake
+name: Verify handshake and relay scheduling
 on:
   push:
     branches: [master, 'feature/**']
@@ -15,4 +15,4 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - run: sh scripts/build-api-local.sh
+      - run: sh scripts/build-relay-local.sh

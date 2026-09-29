@@ -1,0 +1,8 @@
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY artifacts/relay/hbbs artifacts/relay/hbbr /usr/local/bin/
+LABEL org.opencontainers.image.title="RustDesk adaptive relay local build"
+WORKDIR /root
+ENV HOME=/root
+CMD ["hbbs"]

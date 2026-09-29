@@ -2,3 +2,7 @@
 !Dockerfile.api-local
 !artifacts/
 !artifacts/hbbs
+!Dockerfile.relay-local
+!artifacts/relay/
+!artifacts/relay/hbbs
+!artifacts/relay/hbbr

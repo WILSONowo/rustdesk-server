@@ -4,6 +4,8 @@
 
 > 基于官方 1.1.16，修复客户端登录 API 后的 TCP 握手超时。详见 [项目说明](FORK_RELEASE.md) 和 [握手实现](API_HANDSHAKE.md)。本 fork 使用上方下载入口，下方保留上游说明。
 
+开发分支新增可选的[多中继调度](RELAY_SCHEDULER.md)：根据双方位置、节点负载和健康状态分配中继，兼容官方客户端，尚未发布。
+
 [![build](https://github.com/rustdesk/rustdesk-server/actions/workflows/build.yaml/badge.svg)](https://github.com/rustdesk/rustdesk-server/actions/workflows/build.yaml)
 
 [**Download**](https://github.com/rustdesk/rustdesk-server/releases)
