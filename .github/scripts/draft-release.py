@@ -33,10 +33,9 @@ def main():
         ["git", "submodule", "status", "--recursive"], text=True).splitlines()
     info = args.assets / "build-info.json"
     info.write_text(json.dumps(metadata, indent=2) + "\n")
-    files.append(info)
     sums = args.assets / "SHA256SUMS"
     sums.write_text("".join(f"{hashlib.file_digest(p.open('rb'), 'sha256').hexdigest()}  {p.name}\n"
-                            for p in sorted(files)))
+                            for p in sorted(files + [info])))
     if args.prepare_only:
         print(f"Validated {args.expected} files and prepared checksums")
         return
@@ -60,8 +59,8 @@ def main():
            "--target", commit, "--draft", "--prerelease", "--title", args.tag,
            "--notes", "")
     gh("release", "upload", args.tag, "--repo", repo, "--clobber",
-       *(str(p) for p in files + [sums]))
-    print(f"Draft {repo}@{args.tag}: {args.expected} files, provenance and checksums")
+       *(str(p) for p in files))
+    print(f"Draft {repo}@{args.tag}: {args.expected} release files (checksums kept in build output)")
 
 
 if __name__ == "__main__":

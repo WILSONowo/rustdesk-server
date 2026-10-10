@@ -76,7 +76,8 @@ metadata = {
 (assets / 'SHA256SUMS-beta1-supplement.txt').write_text(''.join(
     f'{digest(p)[7:]}  {p.name}\n' for p in sorted(assets.iterdir())))
 old = {a['name']: a for a in release['assets']}
-expected = {p.name: digest(p) for p in assets.iterdir()}
+expected = {p.name: digest(p) for p in assets.iterdir()
+            if p.suffix in {'.zip', '.deb'} or p.name.endswith('.tar.gz')}
 # Validate all conflicts before uploading anything. Never use --clobber.
 for name, checksum in expected.items():
     if name in old:
@@ -95,4 +96,4 @@ for name, checksum in expected.items():
     assert received[name]['digest'] == checksum, name
 for name, asset in old.items():
     assert received[name]['id'] == asset['id'] and received[name]['digest'] == asset['digest']
-print(f'Verified {count} packages and two metadata files; existing release contents preserved.')
+print(f'Verified {count} packages; metadata retained in build output; existing release contents preserved.')
