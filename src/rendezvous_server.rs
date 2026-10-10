@@ -1,6 +1,7 @@
 use crate::common::*;
 use crate::peer::*;
 use crate::secure_tcp::SecureTcp;
+use crate::relay_scheduler::Scheduler;
 use hbb_common::{
     allow_err, bail,
     bytes::{Bytes, BytesMut},
@@ -87,6 +88,7 @@ pub struct RendezvousServer {
     tx: Sender,
     relay_servers: Arc<RelayServers>,
     relay_servers0: Arc<RelayServers>,
+    scheduler: Option<Arc<Scheduler>>,
     rendezvous_servers: Arc<Vec<String>>,
     inner: Arc<Inner>,
 }
@@ -134,6 +136,7 @@ impl RendezvousServer {
             tx: tx.clone(),
             relay_servers: Default::default(),
             relay_servers0: Default::default(),
+            scheduler: Scheduler::from_env()?,
             rendezvous_servers: Arc::new(rendezvous_servers),
             inner: Arc::new(Inner {
                 serial,
@@ -148,6 +151,13 @@ impl RendezvousServer {
         log::info!("local-ip: {:?}", rs.inner.local_ip);
         std::env::set_var("PORT_FOR_API", port.to_string());
         rs.parse_relay_servers(&get_arg("relay-servers"));
+        if let Some(scheduler) = &rs.scheduler {
+            if rs.inner.mask.is_some() {
+                bail!("RELAY_SCHEDULER_CONFIG cannot be combined with --mask/--local-ip relay overrides");
+            }
+            log::info!("Adaptive relay scheduling enabled; waiting for healthy node samples");
+            scheduler.start();
+        }
         let mut listener = create_tcp_listener(port).await?;
         let mut listener2 = create_tcp_listener(nat_port).await?;
         let mut listener3 = create_tcp_listener(ws_port).await?;
@@ -242,7 +252,7 @@ impl RendezvousServer {
         loop {
             tokio::select! {
                 _ = timer_check_relay.tick() => {
-                    if self.relay_servers0.len() > 1 {
+                    if self.scheduler.is_none() && self.relay_servers0.len() > 1 {
                         let rs = self.relay_servers0.clone();
                         let tx = self.tx.clone();
                         tokio::spawn(async move {
@@ -492,6 +502,15 @@ impl RendezvousServer {
                     return true;
                 }
                 Some(rendezvous_message::Union::RequestRelay(mut rf)) => {
+                    if self.scheduler.as_ref().map(|s| !s.permits_negotiation(&rf.relay_server)).unwrap_or(false) {
+                        let mut reply = RendezvousMessage::new();
+                        reply.set_relay_response(RelayResponse {
+                            refuse_reason: "Relay unavailable; reconnect to select another relay".into(),
+                            ..Default::default()
+                        });
+                        Self::send_to_sink(sink, reply).await;
+                        return false;
+                    }
                     // there maybe several attempt, so sink can be none
                     if let Some(sink) = sink.take() {
                         self.tcp_punch.lock().await.insert(try_into_v4(addr), sink);
@@ -508,13 +527,20 @@ impl RendezvousServer {
                 Some(rendezvous_message::Union::RelayResponse(mut rr)) => {
                     let addr_b = AddrMangle::decode(&rr.socket_addr);
                     rr.socket_addr = Default::default();
+                    // A NAT-symmetric target can initiate relaying without RequestRelay.
+                    // Check that path too, including the client's default relay fallback.
+                    if !rr.relay_server.is_empty() && self.scheduler.as_ref()
+                        .map(|s| !s.permits_negotiation(&rr.relay_server)).unwrap_or(false) {
+                        rr.relay_server.clear();
+                        rr.refuse_reason = "Relay unavailable; reconnect to select another relay".into();
+                    }
                     let id = rr.id();
                     if !id.is_empty() {
                         let pk = self.get_pk(&rr.version, id.to_owned()).await;
                         rr.set_pk(pk);
                     }
                     let mut msg_out = RendezvousMessage::new();
-                    if !rr.relay_server.is_empty() {
+                    if self.scheduler.is_none() && !rr.relay_server.is_empty() {
                         if self.is_lan(addr_b) {
                             // https://github.com/rustdesk/rustdesk-server/issues/24
                             rr.relay_server = self.inner.local_ip.clone();
@@ -729,6 +755,13 @@ impl RendezvousServer {
             let peer_is_lan = self.is_lan(peer_addr);
             let is_lan = self.is_lan(addr);
             let mut relay_server = self.get_relay_server(addr.ip(), peer_addr.ip());
+            if self.scheduler.is_some() && relay_server.is_empty() && ALWAYS_USE_RELAY.load(Ordering::SeqCst) {
+                msg_out.set_punch_hole_response(PunchHoleResponse {
+                    other_failure: "No healthy relay has available capacity; try again later".into(),
+                    ..Default::default()
+                });
+                return Ok((msg_out, None));
+            }
             if ALWAYS_USE_RELAY.load(Ordering::SeqCst) || (peer_is_lan ^ is_lan) {
                 if peer_is_lan {
                     // https://github.com/rustdesk/rustdesk-server/issues/24
@@ -921,7 +954,10 @@ impl RendezvousServer {
         self.relay_servers = self.relay_servers0.clone();
     }
 
-    fn get_relay_server(&self, _pa: IpAddr, _pb: IpAddr) -> String {
+    fn get_relay_server(&self, pa: IpAddr, pb: IpAddr) -> String {
+        if let Some(scheduler) = &self.scheduler {
+            return scheduler.select(pa, pb).unwrap_or_default();
+        }
         if self.relay_servers.is_empty() {
             return "".to_owned();
         } else if self.relay_servers.len() == 1 {
@@ -939,17 +975,21 @@ impl RendezvousServer {
         match fds.next() {
             Some("h") => {
                 res = format!(
-                    "{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+                    "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
                     "relay-servers(rs) <separated by ,>",
                     "reload-geo(rg)",
                     "ip-blocker(ib) [<ip>|<number>] [-]",
                     "ip-changes(ic) [<id>|<number>] [-]",
                     "punch-requests(pr) [<number>] [-]",
                     "always-use-relay(aur)",
-                    "test-geo(tg) <ip1> <ip2>"
+                    "test-geo(tg) <ip1> <ip2>",
+                    "relay-status(rst)"
                 )
             }
             Some("relay-servers" | "rs") => {
+                if self.scheduler.is_some() {
+                    return "Adaptive scheduler enabled; edit RELAY_SCHEDULER_CONFIG and restart hbbs".into();
+                }
                 if let Some(rs) = fds.next() {
                     self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
                 } else {
@@ -1078,15 +1118,20 @@ impl RendezvousServer {
                     );
                 }
             }
+            Some("relay-status" | "rst") => {
+                res = self.scheduler.as_ref().map(|s| s.status()).unwrap_or_else(|| "Adaptive scheduler disabled".into());
+            }
             Some("test-geo" | "tg") => {
                 if let Some(rs) = fds.next() {
                     if let Ok(a) = rs.parse::<IpAddr>() {
                         if let Some(rs) = fds.next() {
                             if let Ok(b) = rs.parse::<IpAddr>() {
-                                res = format!("{:?}", self.get_relay_server(a, b));
+                                res = format!("{:?}", self.scheduler.as_ref().map(|s| s.preview(a, b).unwrap_or_default())
+                                    .unwrap_or_else(|| self.get_relay_server(a, b)));
                             }
                         } else {
-                            res = format!("{:?}", self.get_relay_server(a, a));
+                            res = format!("{:?}", self.scheduler.as_ref().map(|s| s.preview(a, a).unwrap_or_default())
+                                .unwrap_or_else(|| self.get_relay_server(a, a)));
                         }
                     }
                 }
