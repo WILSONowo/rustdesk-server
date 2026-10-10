@@ -1,0 +1,29 @@
+name: Upload verified beta1 supplements
+'on':
+  push:
+    branches:
+    - feature/server-fixapi
+    paths:
+    - .github/workflows/supplement-release.yml
+    - .github/scripts/supplement-release.py
+  workflow_dispatch: {}
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: upload-beta1-supplements
+  cancel-in-progress: false
+jobs:
+  upload:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+    - name: Add missing beta1 assets and verify checksums
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: 1.1.16-beta1
+        SOURCE_COMMIT: 65ceee0276c270adea152520a524d14b36605098
+        BUILD_COMMIT: 52530af7d8fb91e859252765479638b19b1b30b1
+        BUILD_RUN: '38060027673'
+        PACKAGE_KIND: server
+      run: python3 .github/scripts/supplement-release.py
