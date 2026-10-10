@@ -1,0 +1,144 @@
+name: Supplement beta1 assets
+'on':
+  push:
+    branches:
+    - feature/server-fixapi
+    paths:
+    - .github/workflows/backfill-beta1.yml
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: supplement-beta1
+  cancel-in-progress: false
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - arch: amd64
+          target: x86_64-unknown-linux-musl
+          deb: amd64
+        - arch: arm64v8
+          target: aarch64-unknown-linux-musl
+          deb: arm64
+        - arch: armv7
+          target: armv7-unknown-linux-musleabihf
+          deb: armhf
+        - arch: i386
+          target: i686-unknown-linux-musl
+          deb: i386
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        ref: 65ceee0276c270adea152520a524d14b36605098
+    - name: Verify immutable beta1 source
+      shell: bash
+      run: |
+        test "$(git rev-parse HEAD)" = 65ceee0276c270adea152520a524d14b36605098
+    - uses: dtolnay/rust-toolchain@1.90.0
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: server-${{ matrix.target }}
+    - run: cargo install cross --version 0.2.5 --locked
+    - run: cross build --locked --release --all-features --target "$TARGET"
+      env:
+        TARGET: ${{ matrix.target }}
+    - name: Package upstream Linux formats
+      env:
+        ARCH: ${{ matrix.arch }}
+        TARGET: ${{ matrix.target }}
+        DEB_ARCH: ${{ matrix.deb }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y zip debhelper
+        mkdir -p "$ARCH" release-assets debian-build/package/bin
+        cp "target/$TARGET/release/"{hbbs,hbbr,rustdesk-utils} "$ARCH/"
+        zip -qr "release-assets/rustdesk-server-linux-$ARCH.zip" "$ARCH"
+        cp "$ARCH/"* debian-build/package/bin/
+        cp -a debian systemd debian-build/package/
+        sed "s/{{ ARCH }}/$DEB_ARCH/" debian/control.tpl > debian-build/package/debian/control
+        VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+        DEB_VERSION=${VERSION/-beta/~beta}
+        if [ "$DEB_ARCH" != amd64 ]; then sudo apt-get install -y "crossbuild-essential-$DEB_ARCH"; fi
+        printf 'rustdesk-server (%s) unstable; urgency=medium\n\n  * Package release build.\n\n -- GitHub Actions <actions@github.com>  %s\n' "$DEB_VERSION" "$(date -R)" > debian-build/package/debian/changelog
+        (cd debian-build/package && dpkg-buildpackage -us -uc -b -d -a"$DEB_ARCH")
+        cp debian-build/*.deb release-assets/
+    - uses: actions/upload-artifact@v4
+      with:
+        name: binaries-linux-${{ matrix.arch }}
+        path: ${{ matrix.arch }}/
+        if-no-files-found: error
+    - uses: actions/upload-artifact@v4
+      with:
+        name: server-release-${{ matrix.arch }}
+        path: release-assets/
+        if-no-files-found: error
+  windows:
+    runs-on: windows-2022
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        ref: 65ceee0276c270adea152520a524d14b36605098
+    - name: Verify immutable beta1 source
+      shell: bash
+      run: |
+        test "$(git rev-parse HEAD)" = 65ceee0276c270adea152520a524d14b36605098
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.sha }}
+        path: .release-tools
+        sparse-checkout: |-
+          ui/html/package-lock.json
+          ui/setup.nsi
+        sparse-checkout-cone-mode: false
+    - name: Apply packaging-only Windows inputs
+      shell: pwsh
+      run: |
+        Copy-Item .release-tools/ui/html/package-lock.json ui/html/package-lock.json
+        Copy-Item .release-tools/ui/setup.nsi ui/setup.nsi
+    - uses: dtolnay/rust-toolchain@1.90.0
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: |
+          . -> target
+          ui -> target
+    - run: cargo build --locked --release --all-features --target x86_64-pc-windows-msvc
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    - name: Build upstream Windows UI
+      env:
+        RELEASE_TAG: 1.1.16-beta1
+      shell: pwsh
+      run: |
+        choco install nsis -y --no-progress
+        Push-Location ui/html
+        npm ci
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        npm run build
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        Pop-Location
+        Push-Location ui
+        cargo build --locked --release
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        New-Item -ItemType Directory -Force setup/bin,setup/logs,SignOutput | Out-Null
+        Copy-Item ../target/x86_64-pc-windows-msvc/release/*.exe setup/bin/
+        Copy-Item target/release/*.exe setup/
+        & 'C:/Program Files (x86)/NSIS/makensis.exe' /V1 "/DRELEASE_VERSION=$env:RELEASE_TAG" setup.nsi
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        Copy-Item RustDeskServer.Setup.exe SignOutput/
+        Copy-Item ../target/x86_64-pc-windows-msvc/release/hbbs.exe,../target/x86_64-pc-windows-msvc/release/hbbr.exe,../target/x86_64-pc-windows-msvc/release/rustdesk-utils.exe SignOutput/
+        Pop-Location
+        New-Item -ItemType Directory -Force x86_64,release-assets | Out-Null
+        Copy-Item ui/SignOutput/* x86_64/
+        Compress-Archive -Path x86_64 -DestinationPath release-assets/rustdesk-server-windows-x86_64-unsigned.zip
+    - uses: actions/upload-artifact@v4
+      with:
+        name: server-release-windows
+        path: release-assets/
+        if-no-files-found: error
