@@ -92,10 +92,12 @@ impl Server {
 
     fn start_with_options(force: bool, mask: bool, key: &str, scheduler: bool) -> Self {
         let port = loop {
-            let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
-            let port = reservation.local_addr().unwrap().port();
-            if (3..65533).contains(&port)
-                && TcpListener::bind(("127.0.0.1", port - 1)).is_ok()
+            // Stay below the normal ephemeral range: a startup probe must not
+            // accidentally self-connect before the child binds its listener.
+            let random = uuid::Uuid::new_v4();
+            let port = 16000 + u16::from_le_bytes([random.as_bytes()[0], random.as_bytes()[1]]) % 14000;
+            let Ok(_reservation) = TcpListener::bind(("127.0.0.1", port)) else { continue };
+            if TcpListener::bind(("127.0.0.1", port - 1)).is_ok()
                 && TcpListener::bind(("127.0.0.1", port + 2)).is_ok()
                 && UdpSocket::bind(("127.0.0.1", port)).is_ok()
             { break port; }
@@ -132,7 +134,18 @@ impl Server {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             assert!(server.child.try_wait().unwrap().is_none(), "hbbs exited during startup");
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() { break; }
+            // A listening port alone does not establish that hbbs is ready to
+            // process messages. Require an application response from its loop.
+            let ready = (|| -> std::io::Result<bool> {
+                let mut probe = TcpStream::connect(("127.0.0.1", port - 1))?;
+                probe.set_read_timeout(Some(Duration::from_millis(200)))?;
+                probe.set_write_timeout(Some(Duration::from_millis(200)))?;
+                probe.write_all(b"relay-servers")?;
+                let mut reply = String::new();
+                probe.read_to_string(&mut reply)?;
+                Ok(reply.contains(RELAY) || reply.contains("Adaptive scheduler enabled"))
+            })().unwrap_or(false);
+            if ready { break; }
             assert!(Instant::now() < deadline, "hbbs startup timed out");
             thread::sleep(Duration::from_millis(20));
         }
@@ -222,6 +235,7 @@ impl Drop for Server {
     }
 }
 
+#[track_caller]
 fn udp_receive(peer: &UdpSocket) -> RendezvousMessage {
     let mut raw = [0; 65536];
     let n = peer.recv(&mut raw).unwrap();
