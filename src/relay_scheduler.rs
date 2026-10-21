@@ -194,7 +194,7 @@ struct Health {
     reservations: Vec<Instant>,
 }
 impl Health {
-    fn update(&mut self, sample: Option<Snapshot>, now: Instant, required: u32) {
+    fn update(&mut self, sample: Option<Snapshot>, now: Instant, poll_started: Instant, required: u32) {
         let was_healthy = self.healthy;
         if let Some(sample) = sample {
             let same_boot = self
@@ -235,6 +235,9 @@ impl Health {
             self.successes = self.successes.saturating_add(1);
             self.healthy = self.successes >= required;
             self.last_success = Some(now);
+            // Reservations bridge telemetry polls; retaining them after a fresh
+            // sample counts established sessions twice until their TTL expires.
+            self.reservations.retain(|reserved| *reserved >= poll_started);
             self.sample = Some(sample);
         } else {
             // Fail closed on the first failed poll; recovery needs consecutive successes.
@@ -352,6 +355,7 @@ impl Scheduler {
     }
 
     async fn poll(&self) {
+        let poll_started = Instant::now();
         let samples =
             join_all((0..self.config.nodes.len()).map(|i| async move { self.probe(i).await.ok() }))
                 .await;
@@ -359,7 +363,7 @@ impl Scheduler {
         let mut health = self.health.write().unwrap_or_else(|p| p.into_inner());
         for (index, sample) in samples.into_iter().enumerate() {
             let old = health[index].healthy;
-            health[index].update(sample, now, self.config.recovery_successes);
+            health[index].update(sample, now, poll_started, self.config.recovery_successes);
             if old != health[index].healthy {
                 log::info!(
                     "Relay {} {}",
@@ -571,8 +575,8 @@ mod tests {
             .iter()
             .map(|n| {
                 let mut s = Health::default();
-                s.update(Some(sample(&n.id, 1000, 0, 0)), Instant::now(), 2);
-                s.update(Some(sample(&n.id, 2000, 0, 0)), Instant::now(), 2);
+                s.update(Some(sample(&n.id, 1000, 0, 0)), Instant::now(), Instant::now(), 2);
+                s.update(Some(sample(&n.id, 2000, 0, 0)), Instant::now(), Instant::now(), 2);
                 s
             })
             .collect();
@@ -583,6 +587,37 @@ mod tests {
             client: reqwest::Client::new(),
             health: RwLock::new(states),
         }
+    }
+
+    #[test]
+    fn fresh_telemetry_does_not_double_count_established_reservations() {
+        let s = scheduler();
+        let ip = "192.0.2.1".parse().unwrap();
+        for _ in 0..40 { s.select(ip, ip); }
+        {
+            let mut states = s.health.write().unwrap();
+            states[0].update(Some(sample("node0", 3000, 0, 40)), Instant::now(), Instant::now(), 2);
+            states[1].sample.as_mut().unwrap().active_sessions = 60;
+            states[2].sample.as_mut().unwrap().active_sessions = 60;
+        }
+        // Forty active sessions leave capacity; old reservations must not make it 80.
+        let unknown = "203.0.113.1".parse().unwrap();
+        assert_eq!(s.preview(unknown, unknown).as_deref(), Some("relay0.example:21117"));
+    }
+
+    #[test]
+    fn poll_keeps_reservations_created_while_metrics_are_in_flight() {
+        let s = scheduler();
+        let started = Instant::now();
+        {
+            let mut states = s.health.write().unwrap();
+            states[0].reservations = vec![started + Duration::from_millis(1); 20];
+            states[0].update(Some(sample("node0", 3000, 0, 90)), started + Duration::from_millis(2), started, 2);
+            states[1].sample.as_mut().unwrap().active_sessions = 95;
+            states[2].sample.as_mut().unwrap().active_sessions = 95;
+        }
+        let ip = "203.0.113.1".parse().unwrap();
+        assert_ne!(s.preview(ip, ip).as_deref(), Some("relay0.example:21117"));
     }
 
     #[test]
@@ -648,7 +683,7 @@ mod tests {
         s.health.write().unwrap()[2].last_success = Some(Instant::now() - Duration::from_secs(13));
         assert!(!s.permits_negotiation("relay2.example:21117"));
         for state in s.health.write().unwrap().iter_mut() {
-            state.update(None, Instant::now(), 2);
+            state.update(None, Instant::now(), Instant::now(), 2);
         }
         assert!(s.preview(a, a).is_none());
     }
@@ -657,22 +692,22 @@ mod tests {
     fn counters_recovery_restarts_and_cached_metrics() {
         let mut h = Health::default();
         let now = Instant::now();
-        h.update(Some(sample("node", 1000, 0, 2)), now, 2);
+        h.update(Some(sample("node", 1000, 0, 2)), now, now, 2);
         assert!(!h.healthy);
-        h.update(Some(sample("node", 2000, 1_000_000, 2)), now, 2);
+        h.update(Some(sample("node", 2000, 1_000_000, 2)), now, now, 2);
         assert!(h.healthy);
         assert_eq!(h.mbps, 8.0);
-        h.update(None, now, 2);
+        h.update(None, now, now, 2);
         assert!(!h.healthy);
-        h.update(Some(sample("node", 3000, 1_000_000, 2)), now, 2);
+        h.update(Some(sample("node", 3000, 1_000_000, 2)), now, now, 2);
         assert!(!h.healthy);
-        h.update(Some(sample("node", 4000, 1_000_000, 2)), now, 2);
+        h.update(Some(sample("node", 4000, 1_000_000, 2)), now, now, 2);
         assert!(h.healthy);
-        h.update(Some(sample("node", 4000, 1_000_000, 2)), now, 2);
+        h.update(Some(sample("node", 4000, 1_000_000, 2)), now, now, 2);
         assert!(!h.healthy, "replayed/cached telemetry must not look fresh");
         let mut reboot = sample("node", 20, 0, 0);
         reboot.boot_id = "boot-two".into();
-        h.update(Some(reboot), now, 2);
+        h.update(Some(reboot), now, now, 2);
         assert!(!h.healthy);
         assert_eq!(h.mbps, 0.0);
     }
