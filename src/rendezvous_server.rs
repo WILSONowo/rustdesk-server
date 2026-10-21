@@ -56,6 +56,12 @@ enum Sink {
     TcpStream(TcpStreamSink, Option<Encrypt>),
     Ws(WsSink),
 }
+struct PunchSink {
+    sink: Sink,
+    // Only accept return candidates for a request that forwarded a valid offer.
+    // Keep this with the existing pending connection, not in an unbounded cache.
+    ipv6_offered: bool,
+}
 type Sender = mpsc::UnboundedSender<Data>;
 type Receiver = mpsc::UnboundedReceiver<Data>;
 static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
@@ -83,7 +89,7 @@ struct Inner {
 
 #[derive(Clone)]
 pub struct RendezvousServer {
-    tcp_punch: Arc<Mutex<HashMap<SocketAddr, Sink>>>,
+    tcp_punch: Arc<Mutex<HashMap<SocketAddr, PunchSink>>>,
     pm: PeerMap,
     tx: Sender,
     relay_servers: Arc<RelayServers>,
@@ -496,7 +502,10 @@ impl RendezvousServer {
                 Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
                     // there maybe several attempt, so sink can be none
                     if let Some(sink) = sink.take() {
-                        self.tcp_punch.lock().await.insert(try_into_v4(addr), sink);
+                        self.tcp_punch.lock().await.insert(try_into_v4(addr), PunchSink {
+                            sink,
+                            ipv6_offered: false,
+                        });
                     }
                     allow_err!(self.handle_tcp_punch_hole_request(addr, ph, key, ws).await);
                     return true;
@@ -513,7 +522,10 @@ impl RendezvousServer {
                     }
                     // there maybe several attempt, so sink can be none
                     if let Some(sink) = sink.take() {
-                        self.tcp_punch.lock().await.insert(try_into_v4(addr), sink);
+                        self.tcp_punch.lock().await.insert(try_into_v4(addr), PunchSink {
+                            sink,
+                            ipv6_offered: false,
+                        });
                     }
                     if let Some(peer) = self.pm.get_in_memory(&rf.id).await {
                         let mut msg_out = RendezvousMessage::new();
@@ -651,6 +663,7 @@ impl RendezvousServer {
             socket_addr: AddrMangle::encode(addr).into(),
             pk: self.get_pk(&phs.version, phs.id).await,
             relay_server: phs.relay_server.clone(),
+            socket_addr_v6: if socket.is_none() { phs.socket_addr_v6 } else { Bytes::new() },
             ..Default::default()
         };
         if let Ok(t) = phs.nat_type.enum_value() {
@@ -685,6 +698,7 @@ impl RendezvousServer {
             socket_addr: la.local_addr.clone(),
             pk: self.get_pk(&la.version, la.id).await,
             relay_server: la.relay_server,
+            socket_addr_v6: if socket.is_none() { la.socket_addr_v6 } else { Bytes::new() },
             ..Default::default()
         };
         p.set_is_local(true);
@@ -754,22 +768,27 @@ impl RendezvousServer {
             let mut msg_out = RendezvousMessage::new();
             let peer_is_lan = self.is_lan(peer_addr);
             let is_lan = self.is_lan(addr);
+            let force_relay = ALWAYS_USE_RELAY.load(Ordering::SeqCst)
+                || ph.force_relay || (peer_is_lan ^ is_lan);
             let mut relay_server = self.get_relay_server(addr.ip(), peer_addr.ip());
-            if self.scheduler.is_some() && relay_server.is_empty() && ALWAYS_USE_RELAY.load(Ordering::SeqCst) {
+            if self.scheduler.is_some() && relay_server.is_empty() && force_relay {
                 msg_out.set_punch_hole_response(PunchHoleResponse {
                     other_failure: "No healthy relay has available capacity; try again later".into(),
                     ..Default::default()
                 });
                 return Ok((msg_out, None));
             }
-            if ALWAYS_USE_RELAY.load(Ordering::SeqCst) || (peer_is_lan ^ is_lan) {
+            if force_relay {
                 if peer_is_lan {
                     // https://github.com/rustdesk/rustdesk-server/issues/24
                     relay_server = self.inner.local_ip.clone()
                 }
                 ph.nat_type = NatType::SYMMETRIC.into(); // will force relay
             }
-            let same_intranet: bool = !ws
+            // IPv4 NAT type alone does not disable the client's independent
+            // IPv6 path. FetchLocalAddr has no force_relay flag, so forced
+            // requests must use PunchHole even when both public IPv4s match.
+            let same_intranet: bool = !force_relay && !ws
                 && (peer_is_lan && is_lan || {
                     match (peer_addr, addr) {
                         (SocketAddr::V4(a), SocketAddr::V4(b)) => a.ip() == b.ip(),
@@ -778,6 +797,17 @@ impl RendezvousServer {
                     }
                 });
             let socket_addr = AddrMangle::encode(addr).into();
+            let mut pending = self.tcp_punch.lock().await;
+            let socket_addr_v6 = crate::ipv6::candidate(
+                ph.socket_addr_v6,
+                !force_relay && !ws && pending.contains_key(&try_into_v4(addr)),
+                if same_intranet { "fetch_local_addr" } else { "punch_hole" },
+                addr,
+            );
+            if let Some(request) = pending.get_mut(&try_into_v4(addr)) {
+                request.ipv6_offered = !socket_addr_v6.is_empty();
+            }
+            drop(pending);
             if same_intranet {
                 log::debug!(
                     "Fetch local addr {:?} {:?} request from {:?}",
@@ -788,6 +818,7 @@ impl RendezvousServer {
                 msg_out.set_fetch_local_addr(FetchLocalAddr {
                     socket_addr,
                     relay_server,
+                    socket_addr_v6,
                     ..Default::default()
                 });
             } else {
@@ -801,6 +832,8 @@ impl RendezvousServer {
                     socket_addr,
                     nat_type: ph.nat_type,
                     relay_server,
+                    force_relay,
+                    socket_addr_v6,
                     ..Default::default()
                 });
             }
@@ -845,11 +878,31 @@ impl RendezvousServer {
     }
 
     #[inline]
-    async fn send_to_tcp(&mut self, msg: RendezvousMessage, addr: SocketAddr) {
-        let mut tcp = self.tcp_punch.lock().await.remove(&try_into_v4(addr));
+    async fn send_to_tcp(&mut self, mut msg: RendezvousMessage, addr: SocketAddr) {
+        let mut tcp = self.take_punch_sink(&mut msg, addr).await;
         tokio::spawn(async move {
             Self::send_to_sink(&mut tcp, msg).await;
         });
+    }
+
+    async fn take_punch_sink(&self, msg: &mut RendezvousMessage, addr: SocketAddr) -> Option<Sink> {
+        let pending = self.tcp_punch.lock().await.remove(&try_into_v4(addr));
+        let allowed = pending.as_ref().map(|p| p.ipv6_offered).unwrap_or(false)
+            && !ALWAYS_USE_RELAY.load(Ordering::SeqCst);
+        let candidate = match msg.union.as_mut() {
+            Some(rendezvous_message::Union::PunchHoleResponse(p)) =>
+                Some((&mut p.socket_addr_v6, "punch_hole_response")),
+            Some(rendezvous_message::Union::RelayResponse(r)) =>
+                Some((&mut r.socket_addr_v6, "relay_response")),
+            _ => None,
+        };
+        if let Some((raw, stage)) = candidate {
+            *raw = crate::ipv6::candidate(std::mem::take(raw), allowed, stage, addr);
+        }
+        if pending.is_none() {
+            log::debug!("ipv6_candidate control={addr} result=not_sent reason=no_pending_request");
+        }
+        pending.map(|p| p.sink)
     }
 
     #[inline]
@@ -875,10 +928,10 @@ impl RendezvousServer {
     #[inline]
     async fn send_to_tcp_sync(
         &mut self,
-        msg: RendezvousMessage,
+        mut msg: RendezvousMessage,
         addr: SocketAddr,
     ) -> ResultType<()> {
-        let mut sink = self.tcp_punch.lock().await.remove(&try_into_v4(addr));
+        let mut sink = self.take_punch_sink(&mut msg, addr).await;
         Self::send_to_sink(&mut sink, msg).await;
         Ok(())
     }
@@ -1109,7 +1162,6 @@ impl RendezvousServer {
                     } else {
                         ALWAYS_USE_RELAY.store(false, Ordering::SeqCst);
                     }
-                    self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
                 } else {
                     let _ = writeln!(
                         res,
