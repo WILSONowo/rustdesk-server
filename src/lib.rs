@@ -1,4 +1,5 @@
 mod rendezvous_server;
+mod ipv6;
 mod secure_tcp;
 mod relay_scheduler;
 mod relay_telemetry;
