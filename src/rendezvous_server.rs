@@ -68,6 +68,28 @@ static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
 type RelayServers = Vec<String>;
 const CHECK_RELAY_TIMEOUT: u64 = 3_000;
 static ALWAYS_USE_RELAY: AtomicBool = AtomicBool::new(false);
+const MAX_RELAY_UUID_LEN: usize = 128;
+
+// The peer sends this uuid to whatever relay_server names, so keep control bytes out of it.
+fn validate_relay_uuid(value: &str) -> Result<(), &'static str> {
+    if value.is_empty()
+        || value.len() > MAX_RELAY_UUID_LEN
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("Invalid relay UUID");
+    }
+    Ok(())
+}
+
+// A peer acknowledging a RequestRelay leaves both fields empty.
+fn validate_relay_response(uuid: &str, relay_server: &str) -> Result<(), &'static str> {
+    if uuid.is_empty() && relay_server.is_empty() {
+        return Ok(());
+    }
+    validate_relay_uuid(uuid)
+}
 
 // Store punch hole requests
 use once_cell::sync::Lazy;
@@ -530,6 +552,13 @@ impl RendezvousServer {
                     return true;
                 }
                 Some(rendezvous_message::Union::RequestRelay(mut rf)) => {
+                    if let Err(err) = validate_relay_uuid(&rf.uuid) {
+                        log::warn!(
+                            "Drop RequestRelay from {addr}: {err} (length {})",
+                            rf.uuid.len()
+                        );
+                        return false;
+                    }
                     if self.scheduler.as_ref().map(|s| !s.permits_negotiation(&rf.relay_server)).unwrap_or(false) {
                         let mut reply = RendezvousMessage::new();
                         reply.set_relay_response(RelayResponse {
@@ -556,6 +585,13 @@ impl RendezvousServer {
                     return true;
                 }
                 Some(rendezvous_message::Union::RelayResponse(mut rr)) => {
+                    if let Err(err) = validate_relay_response(&rr.uuid, &rr.relay_server) {
+                        log::warn!(
+                            "Drop RelayResponse from {addr}: {err} (length {})",
+                            rr.uuid.len()
+                        );
+                        return false;
+                    }
                     let addr_b = AddrMangle::decode(&rr.socket_addr);
                     rr.socket_addr = Default::default();
                     // A NAT-symmetric target can initiate relaying without RequestRelay.
@@ -1501,6 +1537,28 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_uuid_validation() {
+        let uuid = "e4c181d0-41c7-4ae6-8ef0-36581b6b2b12";
+        assert_eq!(validate_relay_response(uuid, "relay.example"), Ok(()));
+        assert_eq!(validate_relay_response("", ""), Ok(()));
+        let max_len = "a".repeat(128);
+        for value in [
+            uuid,
+            "E4C181D0-41C7-4AE6-8EF0-36581B6B2B12",
+            "01890a5d-ac96-774b-bcce-b302099a8057",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            max_len.as_str(),
+        ] {
+            assert_eq!(validate_relay_uuid(value), Ok(()), "rejected {value:?}");
+        }
+        let too_long = "a".repeat(129);
+        for value in ["", "\r\nPING\r\n", "a b", "a\0", "é", too_long.as_str()] {
+            assert!(validate_relay_uuid(value).is_err(), "accepted {value:?}");
+            assert!(validate_relay_response(value, "relay.example").is_err());
+        }
+    }
 
     #[hbb_common::tokio::test]
     async fn punch_reqs_bounded() {
