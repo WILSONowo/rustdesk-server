@@ -35,7 +35,7 @@ use hbb_common::{
 use ipnetwork::Ipv4Network;
 use sodiumoxide::crypto::sign;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::Arc,
@@ -68,14 +68,55 @@ static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
 type RelayServers = Vec<String>;
 const CHECK_RELAY_TIMEOUT: u64 = 3_000;
 static ALWAYS_USE_RELAY: AtomicBool = AtomicBool::new(false);
+const MAX_RELAY_UUID_LEN: usize = 128;
+
+// The peer sends this uuid to whatever relay_server names, so keep control bytes out of it.
+fn validate_relay_uuid(value: &str) -> Result<(), &'static str> {
+    if value.is_empty()
+        || value.len() > MAX_RELAY_UUID_LEN
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("Invalid relay UUID");
+    }
+    Ok(())
+}
+
+// A peer acknowledging a RequestRelay leaves both fields empty.
+fn validate_relay_response(uuid: &str, relay_server: &str) -> Result<(), &'static str> {
+    if uuid.is_empty() && relay_server.is_empty() {
+        return Ok(());
+    }
+    validate_relay_uuid(uuid)
+}
 
 // Store punch hole requests
 use once_cell::sync::Lazy;
 use tokio::sync::Mutex as TokioMutex; // differentiate if needed
 #[derive(Clone)]
 struct PunchReqEntry { tm: Instant, from_ip: String, to_ip: String, to_id: String }
-static PUNCH_REQS: Lazy<TokioMutex<Vec<PunchReqEntry>>> = Lazy::new(|| TokioMutex::new(Vec::new()));
+static PUNCH_REQS: Lazy<TokioMutex<VecDeque<PunchReqEntry>>> = Lazy::new(|| TokioMutex::new(VecDeque::new()));
 const PUNCH_REQ_DEDUPE_SEC: u64 = 60;
+static PUNCH_REQ_MAX: Lazy<usize> =
+    Lazy::new(|| get_arg("MAX_PUNCH_REQUESTS").parse().unwrap_or(100_000));
+
+async fn record_punch_req(from_ip: String, to_ip: String, to_id: String) {
+    let max = *PUNCH_REQ_MAX;
+    if max == 0 { return; }
+    let mut lock = PUNCH_REQS.lock().await;
+    let mut dup = false;
+    for e in lock.iter().rev().take(30) { // only check recent tail subset for speed
+        if e.from_ip == from_ip && e.to_id == to_id {
+            if e.tm.elapsed().as_secs() < PUNCH_REQ_DEDUPE_SEC { dup = true; }
+            break;
+        }
+    }
+    if !dup {
+        if lock.len() >= max { lock.pop_front(); }
+        lock.push_back(PunchReqEntry { tm: Instant::now(), from_ip, to_ip, to_id });
+    }
+}
 
 #[derive(Clone)]
 struct Inner {
@@ -109,7 +150,7 @@ enum LoopFailure {
 impl RendezvousServer {
     #[tokio::main(flavor = "multi_thread")]
     pub async fn start(port: i32, serial: i32, key: &str, rmem: usize) -> ResultType<()> {
-        let (key, sk) = Self::get_server_sk(key);
+        let (key, sk) = Self::get_server_sk(key)?;
         let nat_port = port - 1;
         let ws_port = port + 2;
         let pm = PeerMap::new().await?;
@@ -342,7 +383,7 @@ impl RendezvousServer {
             match msg_in.union {
                 Some(rendezvous_message::Union::RegisterPeer(rp)) => {
                     // B registered
-                    if !rp.id.is_empty() {
+                    if !rp.id.is_empty() && rp.id.len() <= MAX_PEER_ID_LEN {
                         log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
                         self.update_addr(rp.id, addr, socket).await?;
                         if self.inner.serial > rp.serial {
@@ -362,7 +403,7 @@ impl RendezvousServer {
                     }
                     let id = rk.id;
                     let ip = addr.ip().to_string();
-                    if id.len() < 6 {
+                    if id.len() < 6 || id.len() > MAX_PEER_ID_LEN {
                         return send_rk_res(socket, addr, UUID_MISMATCH).await;
                     } else if !self.check_ip_blocker(&ip, &id).await {
                         return send_rk_res(socket, addr, TOO_FREQUENT).await;
@@ -511,6 +552,13 @@ impl RendezvousServer {
                     return true;
                 }
                 Some(rendezvous_message::Union::RequestRelay(mut rf)) => {
+                    if let Err(err) = validate_relay_uuid(&rf.uuid) {
+                        log::warn!(
+                            "Drop RequestRelay from {addr}: {err} (length {})",
+                            rf.uuid.len()
+                        );
+                        return false;
+                    }
                     if self.scheduler.as_ref().map(|s| !s.permits_negotiation(&rf.relay_server)).unwrap_or(false) {
                         let mut reply = RendezvousMessage::new();
                         reply.set_relay_response(RelayResponse {
@@ -537,6 +585,13 @@ impl RendezvousServer {
                     return true;
                 }
                 Some(rendezvous_message::Union::RelayResponse(mut rr)) => {
+                    if let Err(err) = validate_relay_response(&rr.uuid, &rr.relay_server) {
+                        log::warn!(
+                            "Drop RelayResponse from {addr}: {err} (length {})",
+                            rr.uuid.len()
+                        );
+                        return false;
+                    }
                     let addr_b = AddrMangle::decode(&rr.socket_addr);
                     rr.socket_addr = Default::default();
                     // A NAT-symmetric target can initiate relaying without RequestRelay.
@@ -750,20 +805,12 @@ impl RendezvousServer {
             }
             
             // record punch hole request (from addr -> peer id/peer_addr)
-            {
-                let from_ip = try_into_v4(addr).ip().to_string();
-                let to_ip = try_into_v4(peer_addr).ip().to_string();
-                let to_id_clone = id.clone();
-                let mut lock = PUNCH_REQS.lock().await;
-                let mut dup = false;
-                for e in lock.iter().rev().take(30) { // only check recent tail subset for speed
-                    if e.from_ip == from_ip && e.to_id == to_id_clone {
-                        if e.tm.elapsed().as_secs() < PUNCH_REQ_DEDUPE_SEC { dup = true; }
-                        break;
-                    }
-                }
-                if !dup { lock.push(PunchReqEntry { tm: Instant::now(), from_ip, to_ip, to_id: to_id_clone }); }
-            }
+            record_punch_req(
+                try_into_v4(addr).ip().to_string(),
+                try_into_v4(peer_addr).ip().to_string(),
+                id.clone(),
+            )
+            .await;
 
             let mut msg_out = RendezvousMessage::new();
             let peer_is_lan = self.is_lan(peer_addr);
@@ -1343,7 +1390,7 @@ impl RendezvousServer {
     }
 
     #[inline]
-    fn get_server_sk(key: &str) -> (String, Option<sign::SecretKey>) {
+    fn get_server_sk(key: &str) -> ResultType<(String, Option<sign::SecretKey>)> {
         let mut out_sk = None;
         let mut key = key.to_owned();
         if let Ok(sk) = base64::decode(&key) {
@@ -1357,7 +1404,7 @@ impl RendezvousServer {
         }
 
         if key.is_empty() || key == "-" || key == "_" {
-            let (pk, sk) = crate::common::gen_sk(0);
+            let (pk, sk) = crate::common::gen_sk(0)?;
             out_sk = sk;
             if !key.is_empty() {
                 key = pk;
@@ -1367,7 +1414,7 @@ impl RendezvousServer {
         if !key.is_empty() {
             log::info!("Key: {}", key);
         }
-        (key, out_sk)
+        Ok((key, out_sk))
     }
 
     #[inline]
@@ -1485,4 +1532,64 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
     let s = listen_any(port as _).await?;
     log::debug!("listen on tcp {:?}", s.local_addr());
     Ok(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_uuid_validation() {
+        let uuid = "e4c181d0-41c7-4ae6-8ef0-36581b6b2b12";
+        assert_eq!(validate_relay_response(uuid, "relay.example"), Ok(()));
+        assert_eq!(validate_relay_response("", ""), Ok(()));
+        let max_len = "a".repeat(128);
+        for value in [
+            uuid,
+            "E4C181D0-41C7-4AE6-8EF0-36581B6B2B12",
+            "e4c181d041c74ae68ef036581b6b2b12",
+            "01890a5d-ac96-774b-bcce-b302099a8057",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "a_b-c",
+            max_len.as_str(),
+        ] {
+            assert_eq!(validate_relay_uuid(value), Ok(()), "rejected {value:?}");
+        }
+        let too_long = "a".repeat(129);
+        for value in [
+            "",
+            "\r\nPING\r\n",
+            "e4c181d0-41c7-4ae6-8ef0-36581b6b2b12\n",
+            "e4c181d0 41c7",
+            "{e4c181d0-41c7-4ae6-8ef0-36581b6b2b12}",
+            "e4c181d0\0",
+            "é",
+            too_long.as_str(),
+        ] {
+            assert!(validate_relay_uuid(value).is_err(), "accepted {value:?}");
+            assert!(validate_relay_response(value, "relay.example").is_err());
+        }
+    }
+
+    #[hbb_common::tokio::test]
+    async fn punch_reqs_bounded() {
+        let max = *PUNCH_REQ_MAX;
+        // 31 ids keep every request just outside the 30-entry dedupe window;
+        // one request at least, so MAX_PUNCH_REQUESTS=0 is exercised too
+        for i in 0..(max * 2).max(1) {
+            record_punch_req(
+                "1.2.3.4".to_owned(),
+                "5.6.7.8".to_owned(),
+                format!("peer{}", i % 31),
+            )
+            .await;
+        }
+        let lock = PUNCH_REQS.lock().await;
+        assert_eq!(lock.len(), max);
+        if max > 0 {
+            // the oldest half is evicted and the newest kept
+            assert_eq!(lock.front().unwrap().to_id, format!("peer{}", max % 31));
+            assert_eq!(lock.back().unwrap().to_id, format!("peer{}", (max * 2 - 1) % 31));
+        }
+    }
 }
