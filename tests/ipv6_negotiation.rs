@@ -368,11 +368,11 @@ fn websocket_requests_do_not_enable_the_native_ipv6_path() {
     stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
     let (mut ws, _) = tungstenite::client(format!("ws://127.0.0.1:{}", server.port + 2), stream).unwrap();
     let valid = candidate("2001:db8::1", 41001);
-    ws.write_message(tungstenite::Message::Binary(request("1.5.0", &valid, false))).unwrap();
+    ws.send(tungstenite::Message::Binary(request("1.5.0", &valid, false).into())).unwrap();
     let (route, actual, _) = forwarded(udp_receive(&peer), false);
     assert!(actual.is_empty());
     server.reply(&route, &valid, 19);
-    let response = RendezvousMessage::parse_from_bytes(&ws.read_message().unwrap().into_data()).unwrap();
+    let response = RendezvousMessage::parse_from_bytes(&ws.read().unwrap().into_data()).unwrap();
     assert!(returned(&response).is_empty());
 }
 
